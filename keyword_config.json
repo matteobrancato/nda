@@ -1,0 +1,40 @@
+{
+  "nda_ticket_prefixes": [
+    "NDA"
+  ],
+  "nda_summary_keywords": [
+    "Alignment Meetings",
+    "Documentation creation",
+    "Planning",
+    "Setup",
+    "Team Support",
+    "Onboarding"
+  ],
+  "testing_summary_keywords": [
+    "Duty Activities",
+    "Regression Analysis",
+    "Code refactoring",
+    "Maintenance",
+    "CI/CD maintenance",
+    "Test Data Checks",
+    "Retesting",
+    "Bug Retesting",
+    "Demand"
+  ],
+  "leave_keywords": [
+    "Holiday",
+    "Sick Leave",
+    "Vacation",
+    "PTO",
+    "Leave",
+    "Day Off",
+    "Personal Leave",
+    "Maternity",
+    "Paternity",
+    "Bereavement",
+    "Ferie",
+    "Malattia",
+    "Permesso",
+    "Public holidays"
+  ]
+}

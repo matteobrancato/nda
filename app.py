@@ -3,6 +3,8 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
+from pathlib import Path
+import json
 import io
 import re
 
@@ -46,32 +48,38 @@ st.markdown("""
         padding: 8px 20px; border-radius: 8px 8px 0 0;
     }
     .section-divider { margin: 1.5rem 0; border-top: 2px solid #e9ecef; }
+    .kw-tag {
+        display: inline-block; background: #e9ecef; padding: 2px 8px;
+        border-radius: 10px; font-size: 0.75rem; margin: 2px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# Constants
+# Constants & defaults
 # ---------------------------------------------------------------------------
 JIRA_BASE_URL = "https://elab-aswatson.atlassian.net/browse/"
+CONFIG_PATH = Path(__file__).parent / "keyword_config.json"
 
-NDA_KEYWORDS_TICKET = ["NDA"]
-NDA_KEYWORDS_SUMMARY = [
-    "Alignment Meetings", "Documentation creation", "Planning",
-    "Setup", "Team Support", "Onboarding",
-]
-TESTING_KEYWORDS = [
-    "Duty Activities", "Duty activities",
-    "Regression Analysis", "Code refactoring", "Code Refactoring",
-    "Maintenance", "CI/CD maintenance",
-    "Test Data Checks", "Retesting", "Bug Retesting",
-    "Demand",
-]
-LEAVE_KEYWORDS = [
-    "Holiday", "Sick Leave", "Vacation", "PTO", "Leave",
-    "Day Off", "Personal Leave", "Maternity", "Paternity",
-    "Bereavement", "Ferie", "Malattia", "Permesso",
-    "Public holidays",
-]
+DEFAULT_CONFIG = {
+    "nda_ticket_prefixes": ["NDA"],
+    "nda_summary_keywords": [
+        "Alignment Meetings", "Documentation creation", "Planning",
+        "Setup", "Team Support", "Onboarding",
+    ],
+    "testing_summary_keywords": [
+        "Duty Activities", "Regression Analysis", "Code refactoring",
+        "Maintenance", "CI/CD maintenance",
+        "Test Data Checks", "Retesting", "Bug Retesting",
+        "Demand",
+    ],
+    "leave_keywords": [
+        "Holiday", "Sick Leave", "Vacation", "PTO", "Leave",
+        "Day Off", "Personal Leave", "Maternity", "Paternity",
+        "Bereavement", "Ferie", "Malattia", "Permesso",
+        "Public holidays",
+    ],
+}
 
 # Status mapping
 DELIVERED_STATUSES = {"Done", "In Review", "Closed", "Resolved", "Released"}
@@ -79,13 +87,46 @@ IN_PROGRESS_STATUSES = {"In Progress", "In Development", "In QA"}
 NOT_STARTED_STATUSES = {"To Do", "Open", "Backlog", "New"}
 
 CATEGORY_COLORS = {"NDA": "#ff6b6b", "DA": "#51cf66", "TESTING": "#339af0"}
-DELIVERY_COLORS = {"Delivered": "#51cf66", "In Progress": "#ffd43b", "Not Started": "#dee2e6", "N/A": "#adb5bd"}
+DELIVERY_COLORS = {"Delivered": "#51cf66", "In Progress": "#ffd43b",
+                   "Not Started": "#dee2e6", "N/A": "#adb5bd"}
+
+
+# ---------------------------------------------------------------------------
+# Keyword config persistence
+# ---------------------------------------------------------------------------
+def load_config() -> dict:
+    """Load keyword config from JSON file, falling back to defaults."""
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH) as f:
+                saved = json.load(f)
+            # Merge with defaults so new keys are always present
+            merged = DEFAULT_CONFIG.copy()
+            merged.update(saved)
+            return merged
+        except (json.JSONDecodeError, IOError):
+            pass
+    return DEFAULT_CONFIG.copy()
+
+
+def save_config(cfg: dict) -> None:
+    """Persist keyword config to JSON file."""
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+
+def get_config() -> dict:
+    """Get config from session state, loading from disk on first run."""
+    if "kw_config" not in st.session_state:
+        st.session_state.kw_config = load_config()
+    return st.session_state.kw_config
 
 
 # ---------------------------------------------------------------------------
 # Classification helpers
 # ---------------------------------------------------------------------------
-def contains_any(text: str, keywords: list[str], word_boundary: bool = False) -> bool:
+def contains_any(text: str, keywords: list[str],
+                 word_boundary: bool = False) -> bool:
     if not isinstance(text, str):
         return False
     text_lower = text.lower()
@@ -100,18 +141,19 @@ def contains_any(text: str, keywords: list[str], word_boundary: bool = False) ->
     return False
 
 
-def classify_nda(ticket_no: str, summary: str) -> str:
-    if contains_any(str(ticket_no), NDA_KEYWORDS_TICKET):
+def classify_nda(ticket_no: str, summary: str, cfg: dict) -> str:
+    if contains_any(str(ticket_no), cfg["nda_ticket_prefixes"]):
         return "NDA"
-    if contains_any(str(summary), NDA_KEYWORDS_SUMMARY):
+    if contains_any(str(summary), cfg["nda_summary_keywords"]):
         return "NDA"
     return "NOT NDA"
 
 
-def classify_category(nda_flag: str, summary: str) -> str:
+def classify_category(nda_flag: str, summary: str, cfg: dict) -> str:
     if nda_flag == "NDA":
         return "NDA"
-    if contains_any(str(summary), TESTING_KEYWORDS, word_boundary=True):
+    if contains_any(str(summary), cfg["testing_summary_keywords"],
+                    word_boundary=True):
         return "TESTING"
     return "DA"
 
@@ -128,9 +170,9 @@ def classify_delivery(status) -> str:
         return "In Progress"
     if s in NOT_STARTED_STATUSES:
         return "Not Started"
-    # Fallback heuristics
     sl = s.lower()
-    if any(k in sl for k in ["done", "closed", "resolved", "review", "released"]):
+    if any(k in sl for k in ["done", "closed", "resolved", "review",
+                               "released"]):
         return "Delivered"
     if any(k in sl for k in ["progress", "development", "qa"]):
         return "In Progress"
@@ -164,44 +206,34 @@ def detect_issue_type(summary: str) -> str:
     if not isinstance(summary, str):
         return "Other"
     s = summary.lower()
-    # Leave first
     if detect_leave(summary):
         return "Leave"
-    # Meetings
-    if any(k in s for k in ["meeting", "alignment", "standup", "sync", "call"]):
+    if any(k in s for k in ["meeting", "alignment", "standup", "sync",
+                              "call"]):
         return "Meeting"
-    # Documentation
     if any(k in s for k in ["documentation", "ppts", "wiki"]):
         return "Documentation"
-    # Code review
     if any(k in s for k in ["code review"]):
         return "Code Review"
-    # CI/CD (before maintenance since "CI/CD maintenance" should be CI/CD)
     if any(k in s for k in ["ci/cd", "pipeline", "deploy", "release"]):
         return "CI/CD"
-    # Support (before testing since "TESTIM Support" should be Support)
     if any(k in s for k in ["support", "helpdesk"]):
         return "Support"
-    # Onboarding
     if any(k in s for k in ["onboarding", "knowledge transfer"]):
         return "Onboarding"
-    # Testing / QA (use word boundary for "qa" to avoid matching "AQA")
     if any(k in s for k in ["regression", "retesting", "smoke test",
-                             "automation", "testim"]):
+                              "automation", "testim"]):
         return "Testing / QA"
     if re.search(r'\bqa\b', s):
         return "Testing / QA"
     if re.search(r'\btest\b', s):
         return "Testing / QA"
-    # Bug
     if any(k in s for k in ["bug", "defect", "error", "crash"]):
         return "Bug Fix"
-    # Maintenance
     if any(k in s for k in ["maintenance", "refactor", "cleanup", "duty"]):
         return "Maintenance"
-    # Feature / Dev
     if any(k in s for k in ["feature", "implement", "create", "add ",
-                             "upgrade", "ac ", "ac1", "ac2", "verify"]):
+                              "upgrade", "ac ", "ac1", "ac2", "verify"]):
         return "Development"
     return "Task"
 
@@ -210,7 +242,6 @@ def detect_issue_type(summary: str) -> str:
 # Data loading
 # ---------------------------------------------------------------------------
 def load_flat_sheet(uploaded_file) -> pd.DataFrame | None:
-    """Load the 'Flat (Groupable)' sheet from Excel."""
     try:
         xls = pd.ExcelFile(uploaded_file)
         target = None
@@ -231,55 +262,42 @@ def load_flat_sheet(uploaded_file) -> pd.DataFrame | None:
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Map Jira Assistant column names to standard names."""
     col_map = {}
     for c in df.columns:
         cl = c.strip().lower().rstrip(".")
-        # Ticket
         if cl in ("ticket no", "ticket no.", "issue key", "key", "ticket"):
             col_map[c] = "Ticket No"
-        # Summary
         elif cl in ("summary", "issue summary"):
             col_map[c] = "Summary"
-        # Status
         elif cl in ("status", "issue status"):
             col_map[c] = "Status"
-        # Hours  -- real column is "Hr. Spent"
         elif cl in ("hr. spent", "hrs. spent", "hr spent", "logged hours",
                      "hours", "time spent (hours)", "time spent",
                      "log hours", "total hours"):
             col_map[c] = "Hours"
-        # User  -- real column is "Log user"
         elif cl in ("log user", "user", "username", "assignee",
                      "user name", "display name", "full name", "worker"):
             col_map[c] = "User"
-        # Date
-        elif cl in ("worklog date", "log date", "date", "work date", "created"):
+        elif cl in ("worklog date", "log date", "date", "work date",
+                     "created"):
             col_map[c] = "Date"
-        # Group
         elif cl in ("group name", "group"):
             col_map[c] = "Group"
-        # Original estimate
         elif cl in ("ori. estm.", "ori. estm", "original estimate",
                      "estimate", "estimated hours"):
             col_map[c] = "Estimate"
-        # Total worklogs
         elif cl in ("total worklogs",):
             col_map[c] = "Total Worklogs"
-        # Epic link
         elif cl in ("epic link", "epic", "epic name", "parent"):
             col_map[c] = "Epic"
-        # Issue type
         elif cl in ("issue type", "issuetype", "type"):
             col_map[c] = "Issue Type"
-        # Project
         elif cl in ("project", "project name", "project key"):
             col_map[c] = "Project"
     return df.rename(columns=col_map)
 
 
-def process_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Classify and enrich dataframe."""
+def process_data(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     if "Ticket No" not in df.columns:
         st.error("Column 'Ticket No' not found. Check your file format.")
         return df
@@ -291,39 +309,32 @@ def process_data(df: pd.DataFrame) -> pd.DataFrame:
 
     df["Hours"] = pd.to_numeric(df["Hours"], errors="coerce").fillna(0)
 
-    # Core classifications
     df["NDA Flag"] = df.apply(
-        lambda r: classify_nda(str(r["Ticket No"]), str(r["Summary"])), axis=1
+        lambda r: classify_nda(str(r["Ticket No"]),
+                               str(r["Summary"]), cfg), axis=1
     )
     df["Category"] = df.apply(
-        lambda r: classify_category(r["NDA Flag"], str(r["Summary"])), axis=1
+        lambda r: classify_category(r["NDA Flag"],
+                                    str(r["Summary"]), cfg), axis=1
     )
 
-    # Delivery status
     if "Status" in df.columns:
         df["Delivery"] = df["Status"].apply(classify_delivery)
     else:
         df["Status"] = "Unknown"
         df["Delivery"] = "Unknown"
 
-    # Leave detection
     df["Leave Type"] = df["Summary"].apply(detect_leave)
     df["Is Leave"] = df["Leave Type"].notna()
-
-    # Smart issue type
     df["Issue Category"] = df["Summary"].apply(detect_issue_type)
-
-    # Jira link
     df["Jira Link"] = df["Ticket No"].apply(
-        lambda x: f"{JIRA_BASE_URL}{x}" if pd.notna(x) and str(x).strip() else ""
+        lambda x: f"{JIRA_BASE_URL}{x}"
+        if pd.notna(x) and str(x).strip() else ""
     )
-
-    # Project prefix from ticket
     df["Project"] = df["Ticket No"].apply(
-        lambda x: str(x).split("-")[0] if pd.notna(x) and "-" in str(x) else "Unknown"
+        lambda x: str(x).split("-")[0]
+        if pd.notna(x) and "-" in str(x) else "Unknown"
     )
-
-    # User fallback
     if "User" not in df.columns:
         df["User"] = "Unknown"
 
@@ -333,7 +344,8 @@ def process_data(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Rendering helpers
 # ---------------------------------------------------------------------------
-def metric_card(label: str, value: str, css_class: str, sub: str = "") -> str:
+def metric_card(label: str, value: str, css_class: str,
+                sub: str = "") -> str:
     sub_html = f'<div class="sub">{sub}</div>' if sub else ""
     return (
         f'<div class="metric-card {css_class}">'
@@ -346,7 +358,6 @@ def safe_pct(num: float, den: float) -> float:
 
 
 def display_table(df: pd.DataFrame, cols: list[str], key: str = ""):
-    """Show a dataframe with Jira link column config."""
     available = [c for c in cols if c in df.columns]
     display = df[available].reset_index(drop=True)
     if "Ticket No" in display.columns and "Jira Link" not in display.columns:
@@ -366,13 +377,133 @@ def display_table(df: pd.DataFrame, cols: list[str], key: str = ""):
 
 
 # ---------------------------------------------------------------------------
+# Keyword configuration UI
+# ---------------------------------------------------------------------------
+def render_keyword_config() -> bool:
+    """Render the keyword configuration panel in sidebar.
+
+    Returns True if config was changed and data needs reprocessing.
+    """
+    cfg = get_config()
+    changed = False
+
+    with st.sidebar.expander("Keyword Configuration", expanded=False):
+        st.caption(
+            "Edit the keywords used to classify tickets. "
+            "Changes are saved automatically and persist between sessions."
+        )
+
+        # --- NDA ticket prefixes ---
+        st.markdown("**NDA Ticket Prefixes**")
+        st.caption("Tickets starting with these prefixes are classified as NDA")
+        nda_prefixes_text = st.text_area(
+            "NDA prefixes (one per line)",
+            value="\n".join(cfg["nda_ticket_prefixes"]),
+            height=68,
+            key="cfg_nda_prefixes",
+            label_visibility="collapsed",
+        )
+        new_nda_prefixes = [
+            s.strip() for s in nda_prefixes_text.split("\n") if s.strip()
+        ]
+
+        # --- NDA summary keywords ---
+        st.markdown("**NDA Summary Keywords**")
+        st.caption(
+            "If the summary contains any of these, "
+            "the ticket is classified as NDA"
+        )
+        nda_summary_text = st.text_area(
+            "NDA summary keywords (one per line)",
+            value="\n".join(cfg["nda_summary_keywords"]),
+            height=150,
+            key="cfg_nda_summary",
+            label_visibility="collapsed",
+        )
+        new_nda_summary = [
+            s.strip() for s in nda_summary_text.split("\n") if s.strip()
+        ]
+
+        # --- Testing summary keywords ---
+        st.markdown("**Testing Summary Keywords**")
+        st.caption(
+            "If NOT NDA, and the summary contains any of these, "
+            "the ticket is classified as TESTING. "
+            "Uses word-boundary matching to avoid false positives"
+        )
+        testing_text = st.text_area(
+            "Testing summary keywords (one per line)",
+            value="\n".join(cfg["testing_summary_keywords"]),
+            height=150,
+            key="cfg_testing",
+            label_visibility="collapsed",
+        )
+        new_testing = [
+            s.strip() for s in testing_text.split("\n") if s.strip()
+        ]
+
+        # --- Leave keywords ---
+        st.markdown("**Leave Keywords**")
+        st.caption("Used to detect and sub-classify leave entries")
+        leave_text = st.text_area(
+            "Leave keywords (one per line)",
+            value="\n".join(cfg["leave_keywords"]),
+            height=150,
+            key="cfg_leave",
+            label_visibility="collapsed",
+        )
+        new_leave = [
+            s.strip() for s in leave_text.split("\n") if s.strip()
+        ]
+
+        # Check for changes
+        if (new_nda_prefixes != cfg["nda_ticket_prefixes"]
+                or new_nda_summary != cfg["nda_summary_keywords"]
+                or new_testing != cfg["testing_summary_keywords"]
+                or new_leave != cfg["leave_keywords"]):
+            changed = True
+            cfg["nda_ticket_prefixes"] = new_nda_prefixes
+            cfg["nda_summary_keywords"] = new_nda_summary
+            cfg["testing_summary_keywords"] = new_testing
+            cfg["leave_keywords"] = new_leave
+            st.session_state.kw_config = cfg
+            save_config(cfg)
+            st.success("Configuration saved!", icon="✅")
+
+        st.markdown("---")
+
+        # Reset button
+        if st.button("Reset to defaults", key="cfg_reset"):
+            st.session_state.kw_config = DEFAULT_CONFIG.copy()
+            save_config(DEFAULT_CONFIG)
+            st.rerun()
+
+        # Summary of current config
+        st.markdown("---")
+        st.markdown("**Current classification logic:**")
+        st.markdown(
+            f"1. Ticket prefix in "
+            f"`{cfg['nda_ticket_prefixes']}` → **NDA**\n"
+            f"2. Summary matches NDA keywords "
+            f"({len(cfg['nda_summary_keywords'])}) → **NDA**\n"
+            f"3. Summary matches Testing keywords "
+            f"({len(cfg['testing_summary_keywords'])}) → **TESTING**\n"
+            f"4. Everything else → **DA**"
+        )
+
+    return changed
+
+
+# ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
 def main():
     st.title("Jira Timesheet Dashboard")
-    st.caption("Upload a Jira Assistant Excel export to analyse timesheet data")
+    st.caption(
+        "Upload a Jira Assistant Excel export to analyse timesheet data"
+    )
 
-    # Sidebar
+    # Sidebar: upload
     with st.sidebar:
         st.header("Upload")
         uploaded = st.file_uploader(
@@ -384,10 +515,15 @@ def main():
             "regardless of how many sheets exist."
         )
 
+    # Keyword configuration (always available, even before upload)
+    config_changed = render_keyword_config()
+    cfg = get_config()
+
     if uploaded is None:
         st.info(
             "Upload an Excel file exported from Jira Assistant. "
-            "The dashboard will locate the 'Flat (Groupable)' sheet automatically."
+            "The dashboard will locate the "
+            "'Flat (Groupable)' sheet automatically."
         )
         return
 
@@ -397,7 +533,7 @@ def main():
         return
 
     df = normalize_columns(raw)
-    df = process_data(df)
+    df = process_data(df, cfg)
 
     if "Category" not in df.columns:
         st.error("Processing failed.")
@@ -410,9 +546,11 @@ def main():
         all_users = sorted(df["User"].dropna().unique().tolist())
         sel_users = st.multiselect("Person", all_users, default=all_users)
 
-        all_groups = sorted(df["Group"].dropna().unique().tolist()) if "Group" in df.columns else []
+        all_groups = (sorted(df["Group"].dropna().unique().tolist())
+                      if "Group" in df.columns else [])
         if all_groups:
-            sel_groups = st.multiselect("Group", all_groups, default=all_groups)
+            sel_groups = st.multiselect("Group", all_groups,
+                                        default=all_groups)
         else:
             sel_groups = []
 
@@ -420,10 +558,13 @@ def main():
         sel_cats = st.multiselect("Category", all_cats, default=all_cats)
 
         all_statuses = sorted(df["Status"].dropna().unique().tolist())
-        sel_statuses = st.multiselect("Status", all_statuses, default=all_statuses)
+        sel_statuses = st.multiselect("Status", all_statuses,
+                                      default=all_statuses)
 
     # Apply filters
-    mask = df["User"].isin(sel_users) & df["Category"].isin(sel_cats) & df["Status"].isin(sel_statuses)
+    mask = (df["User"].isin(sel_users)
+            & df["Category"].isin(sel_cats)
+            & df["Status"].isin(sel_statuses))
     if all_groups and sel_groups:
         mask = mask & df["Group"].isin(sel_groups)
     fdf = df[mask].copy()
@@ -444,13 +585,33 @@ def main():
     delivered_h = fdf.loc[fdf["Delivery"] == "Delivered", "Hours"].sum()
 
     c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
-    c1.markdown(metric_card("Total Hours", f"{total_h:,.1f}", "mc-tot"), unsafe_allow_html=True)
-    c2.markdown(metric_card("DA", f"{da_h:,.1f}h", "mc-da", f"{safe_pct(da_h, total_h):.0f}% of total"), unsafe_allow_html=True)
-    c3.markdown(metric_card("Testing", f"{test_h:,.1f}h", "mc-tst", f"{safe_pct(test_h, total_h):.0f}% of total"), unsafe_allow_html=True)
-    c4.markdown(metric_card("NDA", f"{nda_h:,.1f}h", "mc-nda", f"{safe_pct(nda_h, total_h):.0f}% of total"), unsafe_allow_html=True)
-    c5.markdown(metric_card("Leave", f"{leave_h:,.1f}h", "mc-lve", f"{safe_pct(leave_h, total_h):.0f}% of total"), unsafe_allow_html=True)
-    c6.markdown(metric_card("Productive", f"{safe_pct(productive_h, total_h):.0f}%", "mc-prd", f"{productive_h:,.1f}h"), unsafe_allow_html=True)
-    c7.markdown(metric_card("Delivered", f"{safe_pct(delivered_h, total_h):.0f}%", "mc-dlv", f"{delivered_h:,.1f}h"), unsafe_allow_html=True)
+    c1.markdown(metric_card(
+        "Total Hours", f"{total_h:,.1f}", "mc-tot"),
+        unsafe_allow_html=True)
+    c2.markdown(metric_card(
+        "DA", f"{da_h:,.1f}h", "mc-da",
+        f"{safe_pct(da_h, total_h):.0f}% of total"),
+        unsafe_allow_html=True)
+    c3.markdown(metric_card(
+        "Testing", f"{test_h:,.1f}h", "mc-tst",
+        f"{safe_pct(test_h, total_h):.0f}% of total"),
+        unsafe_allow_html=True)
+    c4.markdown(metric_card(
+        "NDA", f"{nda_h:,.1f}h", "mc-nda",
+        f"{safe_pct(nda_h, total_h):.0f}% of total"),
+        unsafe_allow_html=True)
+    c5.markdown(metric_card(
+        "Leave", f"{leave_h:,.1f}h", "mc-lve",
+        f"{safe_pct(leave_h, total_h):.0f}% of total"),
+        unsafe_allow_html=True)
+    c6.markdown(metric_card(
+        "Productive", f"{safe_pct(productive_h, total_h):.0f}%", "mc-prd",
+        f"{productive_h:,.1f}h"),
+        unsafe_allow_html=True)
+    c7.markdown(metric_card(
+        "Delivered", f"{safe_pct(delivered_h, total_h):.0f}%", "mc-dlv",
+        f"{delivered_h:,.1f}h"),
+        unsafe_allow_html=True)
 
     st.markdown("")
 
@@ -462,13 +623,15 @@ def main():
         "Delivery Status", "Leave Analysis", "Raw Data",
     ])
 
-    # === OVERVIEW ==========================================================
+    # === OVERVIEW ======================================================
     with tabs[0]:
         col_pie, col_right = st.columns([1, 1])
 
         with col_pie:
             st.subheader("Hours by Category")
-            cat_totals = fdf.groupby("Category")["Hours"].sum().reset_index().sort_values("Hours", ascending=False)
+            cat_totals = (fdf.groupby("Category")["Hours"]
+                          .sum().reset_index()
+                          .sort_values("Hours", ascending=False))
             fig_pie = px.pie(
                 cat_totals, names="Category", values="Hours",
                 color="Category", color_discrete_map=CATEGORY_COLORS,
@@ -477,20 +640,32 @@ def main():
             fig_pie.update_traces(
                 textinfo="label+percent+value",
                 texttemplate="%{label}<br>%{value:.1f}h (%{percent})",
-                hovertemplate="%{label}: %{value:.1f}h (%{percent})<extra></extra>",
+                hovertemplate=(
+                    "%{label}: %{value:.1f}h (%{percent})<extra></extra>"
+                ),
             )
-            fig_pie.update_layout(margin=dict(t=20, b=20, l=20, r=20), height=400,
-                                  legend=dict(orientation="h", y=-0.1))
+            fig_pie.update_layout(
+                margin=dict(t=20, b=20, l=20, r=20), height=400,
+                legend=dict(orientation="h", y=-0.1),
+            )
             st.plotly_chart(fig_pie, use_container_width=True)
 
-            # Drill-down
             drill = st.selectbox(
-                "Drill into category", ["-- select --"] + cat_totals["Category"].tolist(),
+                "Drill into category",
+                ["-- select --"] + cat_totals["Category"].tolist(),
             )
             if drill != "-- select --":
-                sub = fdf[fdf["Category"] == drill].sort_values("Hours", ascending=False)
-                st.markdown(f"**{drill}** -- {sub['Hours'].sum():.1f}h total, {sub['Ticket No'].nunique()} unique tickets")
-                display_table(sub, ["Ticket No", "Summary", "User", "Hours", "Status", "Delivery", "Issue Category"])
+                sub = fdf[fdf["Category"] == drill].sort_values(
+                    "Hours", ascending=False
+                )
+                st.markdown(
+                    f"**{drill}** -- {sub['Hours'].sum():.1f}h total, "
+                    f"{sub['Ticket No'].nunique()} unique tickets"
+                )
+                display_table(sub, [
+                    "Ticket No", "Summary", "User", "Hours",
+                    "Status", "Delivery", "Issue Category",
+                ])
 
         with col_right:
             st.subheader("Key Ratios")
@@ -499,46 +674,62 @@ def main():
                 "Testing / Total": f"{safe_pct(test_h, total_h):.1f}%",
                 "NDA / Total": f"{safe_pct(nda_h, total_h):.1f}%",
                 "Leave / Total": f"{safe_pct(leave_h, total_h):.1f}%",
-                "Productive (DA+Testing) / Total": f"{safe_pct(productive_h, total_h):.1f}%",
-                "Testing / Productive": f"{safe_pct(test_h, productive_h):.1f}%",
-                "DA / Productive": f"{safe_pct(da_h, productive_h):.1f}%",
-                "Delivered / Total": f"{safe_pct(delivered_h, total_h):.1f}%",
-                "Delivered / Productive": f"{safe_pct(delivered_h, productive_h):.1f}%",
+                "Productive (DA+Testing) / Total":
+                    f"{safe_pct(productive_h, total_h):.1f}%",
+                "Testing / Productive":
+                    f"{safe_pct(test_h, productive_h):.1f}%",
+                "DA / Productive":
+                    f"{safe_pct(da_h, productive_h):.1f}%",
+                "Delivered / Total":
+                    f"{safe_pct(delivered_h, total_h):.1f}%",
+                "Delivered / Productive":
+                    f"{safe_pct(delivered_h, productive_h):.1f}%",
             }
             st.dataframe(
-                pd.DataFrame(list(ratios.items()), columns=["Ratio", "Value"]),
+                pd.DataFrame(list(ratios.items()),
+                             columns=["Ratio", "Value"]),
                 use_container_width=True, hide_index=True,
             )
 
             st.subheader("Hours by Person & Category")
-            pc = fdf.groupby(["User", "Category"])["Hours"].sum().reset_index()
-            fig_bar = px.bar(pc, x="User", y="Hours", color="Category",
-                             color_discrete_map=CATEGORY_COLORS, barmode="stack")
-            fig_bar.update_layout(margin=dict(t=20, b=20), height=350, xaxis_tickangle=-45)
+            pc = (fdf.groupby(["User", "Category"])["Hours"]
+                  .sum().reset_index())
+            fig_bar = px.bar(
+                pc, x="User", y="Hours", color="Category",
+                color_discrete_map=CATEGORY_COLORS, barmode="stack",
+            )
+            fig_bar.update_layout(
+                margin=dict(t=20, b=20), height=350,
+                xaxis_tickangle=-45,
+            )
             st.plotly_chart(fig_bar, use_container_width=True)
 
-        # Issue type distribution
         st.subheader("Issue Type Distribution")
-        it = fdf.groupby("Issue Category")["Hours"].sum().reset_index().sort_values("Hours", ascending=False)
-        fig_it = px.bar(it, x="Issue Category", y="Hours", color="Hours",
-                        color_continuous_scale="Viridis")
+        it = (fdf.groupby("Issue Category")["Hours"]
+              .sum().reset_index()
+              .sort_values("Hours", ascending=False))
+        fig_it = px.bar(
+            it, x="Issue Category", y="Hours", color="Hours",
+            color_continuous_scale="Viridis",
+        )
         fig_it.update_layout(margin=dict(t=20, b=20), height=300)
         st.plotly_chart(fig_it, use_container_width=True)
 
-        # Group breakdown if available
         if "Group" in fdf.columns and fdf["Group"].nunique() > 1:
             st.subheader("Hours by Group")
-            grp = fdf.groupby(["Group", "Category"])["Hours"].sum().reset_index()
-            fig_grp = px.bar(grp, x="Group", y="Hours", color="Category",
-                             color_discrete_map=CATEGORY_COLORS, barmode="stack")
+            grp = (fdf.groupby(["Group", "Category"])["Hours"]
+                   .sum().reset_index())
+            fig_grp = px.bar(
+                grp, x="Group", y="Hours", color="Category",
+                color_discrete_map=CATEGORY_COLORS, barmode="stack",
+            )
             fig_grp.update_layout(margin=dict(t=20, b=20), height=300)
             st.plotly_chart(fig_grp, use_container_width=True)
 
-    # === BY PERSON =========================================================
+    # === BY PERSON =====================================================
     with tabs[1]:
         st.subheader("Person Summary")
 
-        # Build summary per user
         rows = []
         for user in sorted(fdf["User"].unique()):
             ud = fdf[fdf["User"] == user]
@@ -562,10 +753,10 @@ def main():
                 "Productive %": round(safe_pct(da + tst, t), 1),
                 "Delivered %": round(safe_pct(dlv, t), 1),
             })
-        psummary = pd.DataFrame(rows).sort_values("Total Hours", ascending=False)
+        psummary = (pd.DataFrame(rows)
+                    .sort_values("Total Hours", ascending=False))
         st.dataframe(psummary, use_container_width=True, hide_index=True)
 
-        # Per-person pie charts
         st.subheader("Category Distribution per Person")
         users_list = sorted(fdf["User"].unique())
         cols_per_row = min(4, len(users_list))
@@ -579,34 +770,56 @@ def main():
                 ud = fdf[fdf["User"] == user]
                 if ud.empty:
                     continue
-                uc = ud.groupby("Category")["Hours"].sum().reset_index()
-                fig_u = px.pie(uc, names="Category", values="Hours",
-                               color="Category", color_discrete_map=CATEGORY_COLORS,
-                               hole=0.4, title=user)
+                uc = (ud.groupby("Category")["Hours"]
+                      .sum().reset_index())
+                fig_u = px.pie(
+                    uc, names="Category", values="Hours",
+                    color="Category",
+                    color_discrete_map=CATEGORY_COLORS,
+                    hole=0.4, title=user,
+                )
                 fig_u.update_traces(textinfo="percent+value")
-                fig_u.update_layout(margin=dict(t=40, b=10, l=10, r=10),
-                                    height=250, showlegend=False, title_font_size=12)
+                fig_u.update_layout(
+                    margin=dict(t=40, b=10, l=10, r=10),
+                    height=250, showlegend=False, title_font_size=12,
+                )
                 col.plotly_chart(fig_u, use_container_width=True)
 
-        # Deep dive
-        st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="section-divider"></div>',
+            unsafe_allow_html=True,
+        )
         st.subheader("Person Deep Dive")
-        sel_person = st.selectbox("Select person", users_list, key="person_deep")
+        sel_person = st.selectbox(
+            "Select person", users_list, key="person_deep"
+        )
         pd_data = fdf[fdf["User"] == sel_person]
 
         if not pd_data.empty:
             p_t = pd_data["Hours"].sum()
-            p_da = pd_data.loc[pd_data["Category"] == "DA", "Hours"].sum()
-            p_tst = pd_data.loc[pd_data["Category"] == "TESTING", "Hours"].sum()
-            p_nda = pd_data.loc[pd_data["Category"] == "NDA", "Hours"].sum()
-            p_dlv = pd_data.loc[pd_data["Delivery"] == "Delivered", "Hours"].sum()
+            p_da = pd_data.loc[
+                pd_data["Category"] == "DA", "Hours"
+            ].sum()
+            p_tst = pd_data.loc[
+                pd_data["Category"] == "TESTING", "Hours"
+            ].sum()
+            p_nda = pd_data.loc[
+                pd_data["Category"] == "NDA", "Hours"
+            ].sum()
+            p_dlv = pd_data.loc[
+                pd_data["Delivery"] == "Delivered", "Hours"
+            ].sum()
 
             mc1, mc2, mc3, mc4, mc5 = st.columns(5)
             mc1.metric("Total", f"{p_t:.1f}h")
-            mc2.metric("DA", f"{p_da:.1f}h ({safe_pct(p_da, p_t):.0f}%)")
-            mc3.metric("Testing", f"{p_tst:.1f}h ({safe_pct(p_tst, p_t):.0f}%)")
-            mc4.metric("NDA", f"{p_nda:.1f}h ({safe_pct(p_nda, p_t):.0f}%)")
-            mc5.metric("Delivered", f"{p_dlv:.1f}h ({safe_pct(p_dlv, p_t):.0f}%)")
+            mc2.metric("DA",
+                        f"{p_da:.1f}h ({safe_pct(p_da, p_t):.0f}%)")
+            mc3.metric("Testing",
+                        f"{p_tst:.1f}h ({safe_pct(p_tst, p_t):.0f}%)")
+            mc4.metric("NDA",
+                        f"{p_nda:.1f}h ({safe_pct(p_nda, p_t):.0f}%)")
+            mc5.metric("Delivered",
+                        f"{p_dlv:.1f}h ({safe_pct(p_dlv, p_t):.0f}%)")
 
             display_table(
                 pd_data.sort_values("Hours", ascending=False),
@@ -615,7 +828,7 @@ def main():
                 key="person_table",
             )
 
-    # === CATEGORY DETAIL ===================================================
+    # === CATEGORY DETAIL ===============================================
     with tabs[2]:
         st.subheader("Category Breakdown")
 
@@ -633,74 +846,117 @@ def main():
                 unsafe_allow_html=True,
             )
 
-            # Delivery breakdown within category
-            dlv_counts = cat_data.groupby("Delivery")["Hours"].sum().reset_index()
+            dlv_counts = (cat_data.groupby("Delivery")["Hours"]
+                          .sum().reset_index())
             dc1, dc2 = st.columns([1, 2])
             with dc1:
-                fig_dlv = px.pie(dlv_counts, names="Delivery", values="Hours",
-                                 hole=0.4, color="Delivery",
-                                 color_discrete_map=DELIVERY_COLORS)
+                fig_dlv = px.pie(
+                    dlv_counts, names="Delivery", values="Hours",
+                    hole=0.4, color="Delivery",
+                    color_discrete_map=DELIVERY_COLORS,
+                )
                 fig_dlv.update_traces(textinfo="percent+value")
-                fig_dlv.update_layout(margin=dict(t=10, b=10), height=220, showlegend=True)
+                fig_dlv.update_layout(
+                    margin=dict(t=10, b=10), height=220,
+                    showlegend=True,
+                )
                 st.plotly_chart(fig_dlv, use_container_width=True)
 
             with dc2:
-                # Top tickets
-                top = (cat_data.groupby(["Ticket No", "Summary", "Status", "Delivery"])["Hours"]
-                       .sum().reset_index()
-                       .sort_values("Hours", ascending=False).head(15))
-                display_table(top, ["Ticket No", "Summary", "Hours", "Status", "Delivery"],
-                              key=f"cat_{cat}_top")
+                top = (
+                    cat_data
+                    .groupby(["Ticket No", "Summary", "Status",
+                              "Delivery"])["Hours"]
+                    .sum().reset_index()
+                    .sort_values("Hours", ascending=False)
+                    .head(15)
+                )
+                display_table(
+                    top,
+                    ["Ticket No", "Summary", "Hours", "Status",
+                     "Delivery"],
+                    key=f"cat_{cat}_top",
+                )
 
-            # People in this category
-            ppl = cat_data.groupby("User")["Hours"].sum().reset_index().sort_values("Hours", ascending=False)
-            fig_p = px.bar(ppl, x="User", y="Hours", color_discrete_sequence=[color])
-            fig_p.update_layout(margin=dict(t=10, b=20), height=250, xaxis_tickangle=-45)
+            ppl = (cat_data.groupby("User")["Hours"]
+                   .sum().reset_index()
+                   .sort_values("Hours", ascending=False))
+            fig_p = px.bar(
+                ppl, x="User", y="Hours",
+                color_discrete_sequence=[color],
+            )
+            fig_p.update_layout(
+                margin=dict(t=10, b=20), height=250,
+                xaxis_tickangle=-45,
+            )
             st.plotly_chart(fig_p, use_container_width=True)
             st.markdown("---")
 
-    # === DELIVERY STATUS ===================================================
+    # === DELIVERY STATUS ===============================================
     with tabs[3]:
         st.subheader("Delivery Status Analysis")
-        st.markdown("Tickets classified as **Delivered** (Done, In Review), "
-                     "**In Progress**, or **Not Started** (To Do).")
+        st.markdown(
+            "Tickets classified as **Delivered** (Done, In Review), "
+            "**In Progress**, or **Not Started** (To Do)."
+        )
 
-        # Overall delivery pie
         d1, d2 = st.columns([1, 1])
         with d1:
-            dlv_all = fdf.groupby("Delivery")["Hours"].sum().reset_index()
-            fig_da = px.pie(dlv_all, names="Delivery", values="Hours",
-                            color="Delivery", color_discrete_map=DELIVERY_COLORS, hole=0.45)
-            fig_da.update_traces(textinfo="label+percent+value",
-                                 texttemplate="%{label}<br>%{value:.1f}h (%{percent})")
-            fig_da.update_layout(margin=dict(t=20, b=20), height=380)
+            dlv_all = (fdf.groupby("Delivery")["Hours"]
+                       .sum().reset_index())
+            fig_da = px.pie(
+                dlv_all, names="Delivery", values="Hours",
+                color="Delivery",
+                color_discrete_map=DELIVERY_COLORS, hole=0.45,
+            )
+            fig_da.update_traces(
+                textinfo="label+percent+value",
+                texttemplate="%{label}<br>%{value:.1f}h (%{percent})",
+            )
+            fig_da.update_layout(
+                margin=dict(t=20, b=20), height=380,
+            )
             st.plotly_chart(fig_da, use_container_width=True)
 
         with d2:
-            # Delivery by category
-            dc = fdf.groupby(["Category", "Delivery"])["Hours"].sum().reset_index()
-            fig_dc = px.bar(dc, x="Category", y="Hours", color="Delivery",
-                            color_discrete_map=DELIVERY_COLORS, barmode="stack")
-            fig_dc.update_layout(margin=dict(t=20, b=20), height=380)
+            dc = (fdf.groupby(["Category", "Delivery"])["Hours"]
+                  .sum().reset_index())
+            fig_dc = px.bar(
+                dc, x="Category", y="Hours", color="Delivery",
+                color_discrete_map=DELIVERY_COLORS, barmode="stack",
+            )
+            fig_dc.update_layout(
+                margin=dict(t=20, b=20), height=380,
+            )
             st.plotly_chart(fig_dc, use_container_width=True)
 
-        # Delivery by person
         st.subheader("Delivery by Person")
-        dp = fdf.groupby(["User", "Delivery"])["Hours"].sum().reset_index()
-        fig_dp = px.bar(dp, x="User", y="Hours", color="Delivery",
-                        color_discrete_map=DELIVERY_COLORS, barmode="stack")
-        fig_dp.update_layout(margin=dict(t=20, b=20), height=350, xaxis_tickangle=-45)
+        dp = (fdf.groupby(["User", "Delivery"])["Hours"]
+              .sum().reset_index())
+        fig_dp = px.bar(
+            dp, x="User", y="Hours", color="Delivery",
+            color_discrete_map=DELIVERY_COLORS, barmode="stack",
+        )
+        fig_dp.update_layout(
+            margin=dict(t=20, b=20), height=350,
+            xaxis_tickangle=-45,
+        )
         st.plotly_chart(fig_dp, use_container_width=True)
 
-        # Delivery summary table
         st.subheader("Delivery Summary per Person")
         dlv_rows = []
         for user in sorted(fdf["User"].unique()):
             ud = fdf[fdf["User"] == user]
             t = ud["Hours"].sum()
-            dlv = ud.loc[ud["Delivery"] == "Delivered", "Hours"].sum()
-            ip = ud.loc[ud["Delivery"] == "In Progress", "Hours"].sum()
-            ns = ud.loc[ud["Delivery"] == "Not Started", "Hours"].sum()
+            dlv = ud.loc[
+                ud["Delivery"] == "Delivered", "Hours"
+            ].sum()
+            ip = ud.loc[
+                ud["Delivery"] == "In Progress", "Hours"
+            ].sum()
+            ns = ud.loc[
+                ud["Delivery"] == "Not Started", "Hours"
+            ].sum()
             dlv_rows.append({
                 "User": user,
                 "Total Hours": round(t, 1),
@@ -710,22 +966,31 @@ def main():
                 "Delivered %": round(safe_pct(dlv, t), 1),
             })
         st.dataframe(
-            pd.DataFrame(dlv_rows).sort_values("Total Hours", ascending=False),
+            pd.DataFrame(dlv_rows)
+            .sort_values("Total Hours", ascending=False),
             use_container_width=True, hide_index=True,
         )
 
-        # Not delivered tickets detail
         st.subheader("Not Yet Delivered Tickets (In Progress / To Do)")
         not_dlv = fdf[fdf["Delivery"].isin(["In Progress", "Not Started"])]
         if not_dlv.empty:
             st.success("All tickets are delivered.")
         else:
-            not_dlv_agg = (not_dlv.groupby(["Ticket No", "Summary", "Status", "Delivery", "Category"])["Hours"]
-                           .sum().reset_index().sort_values("Hours", ascending=False))
-            display_table(not_dlv_agg, ["Ticket No", "Summary", "Hours", "Status", "Delivery", "Category"],
-                          key="not_delivered")
+            not_dlv_agg = (
+                not_dlv
+                .groupby(["Ticket No", "Summary", "Status",
+                          "Delivery", "Category"])["Hours"]
+                .sum().reset_index()
+                .sort_values("Hours", ascending=False)
+            )
+            display_table(
+                not_dlv_agg,
+                ["Ticket No", "Summary", "Hours", "Status",
+                 "Delivery", "Category"],
+                key="not_delivered",
+            )
 
-    # === LEAVE ANALYSIS ====================================================
+    # === LEAVE ANALYSIS ================================================
     with tabs[4]:
         st.subheader("Leave Analysis")
         leave_data = fdf[fdf["Is Leave"]].copy()
@@ -734,44 +999,75 @@ def main():
             st.info("No leave entries detected.")
         else:
             l_total = leave_data["Hours"].sum()
-            st.markdown(f"**Total leave: {l_total:.1f}h** ({safe_pct(l_total, total_h):.1f}% of all hours)")
+            st.markdown(
+                f"**Total leave: {l_total:.1f}h** "
+                f"({safe_pct(l_total, total_h):.1f}% of all hours)"
+            )
 
             lc1, lc2 = st.columns(2)
             with lc1:
-                lt = leave_data.groupby("Leave Type")["Hours"].sum().reset_index().sort_values("Hours", ascending=False)
-                fig_lt = px.pie(lt, names="Leave Type", values="Hours", hole=0.4,
-                                color_discrete_sequence=px.colors.qualitative.Set3)
+                lt = (leave_data.groupby("Leave Type")["Hours"]
+                      .sum().reset_index()
+                      .sort_values("Hours", ascending=False))
+                fig_lt = px.pie(
+                    lt, names="Leave Type", values="Hours", hole=0.4,
+                    color_discrete_sequence=(
+                        px.colors.qualitative.Set3
+                    ),
+                )
                 fig_lt.update_traces(textinfo="label+percent+value")
-                fig_lt.update_layout(margin=dict(t=20, b=20), height=350)
+                fig_lt.update_layout(
+                    margin=dict(t=20, b=20), height=350,
+                )
                 st.plotly_chart(fig_lt, use_container_width=True)
 
             with lc2:
-                lp = leave_data.groupby(["User", "Leave Type"])["Hours"].sum().reset_index()
-                fig_lp = px.bar(lp, x="User", y="Hours", color="Leave Type",
-                                barmode="stack", color_discrete_sequence=px.colors.qualitative.Set3)
-                fig_lp.update_layout(margin=dict(t=20, b=20), height=350, xaxis_tickangle=-45)
+                lp = (leave_data
+                      .groupby(["User", "Leave Type"])["Hours"]
+                      .sum().reset_index())
+                fig_lp = px.bar(
+                    lp, x="User", y="Hours", color="Leave Type",
+                    barmode="stack",
+                    color_discrete_sequence=(
+                        px.colors.qualitative.Set3
+                    ),
+                )
+                fig_lp.update_layout(
+                    margin=dict(t=20, b=20), height=350,
+                    xaxis_tickangle=-45,
+                )
                 st.plotly_chart(fig_lp, use_container_width=True)
 
-            # Leave per person summary
             st.subheader("Leave per Person")
             lv_rows = []
             for user in sorted(leave_data["User"].unique()):
                 ud = leave_data[leave_data["User"] == user]
-                row = {"User": user, "Total Leave Hours": round(ud["Hours"].sum(), 1)}
+                row = {
+                    "User": user,
+                    "Total Leave Hours": round(ud["Hours"].sum(), 1),
+                }
                 for lt_name in sorted(leave_data["Leave Type"].unique()):
-                    row[lt_name] = round(ud.loc[ud["Leave Type"] == lt_name, "Hours"].sum(), 1)
+                    row[lt_name] = round(
+                        ud.loc[ud["Leave Type"] == lt_name,
+                               "Hours"].sum(), 1
+                    )
                 lv_rows.append(row)
-            st.dataframe(pd.DataFrame(lv_rows), use_container_width=True, hide_index=True)
+            st.dataframe(
+                pd.DataFrame(lv_rows),
+                use_container_width=True, hide_index=True,
+            )
 
-            # Detail
             st.subheader("Leave Detail")
             display_table(
-                leave_data.sort_values(["User", "Hours"], ascending=[True, False]),
-                ["User", "Ticket No", "Summary", "Leave Type", "Hours", "Status"],
+                leave_data.sort_values(
+                    ["User", "Hours"], ascending=[True, False]
+                ),
+                ["User", "Ticket No", "Summary", "Leave Type",
+                 "Hours", "Status"],
                 key="leave_detail",
             )
 
-    # === RAW DATA ==========================================================
+    # === RAW DATA ======================================================
     with tabs[5]:
         st.subheader("Processed Data")
         st.markdown(f"**{len(fdf)} rows** after filters")
@@ -782,7 +1078,9 @@ def main():
         st.download_button(
             "Download filtered data as CSV",
             data=csv,
-            file_name=f"jira_report_{datetime.now().strftime('%Y%m%d')}.csv",
+            file_name=(
+                f"jira_report_{datetime.now().strftime('%Y%m%d')}.csv"
+            ),
             mime="text/csv",
         )
 
