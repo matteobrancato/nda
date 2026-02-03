@@ -971,6 +971,48 @@ def main():
             use_container_width=True, hide_index=True,
         )
 
+        # Delivered tickets per person with expandable detail
+        st.subheader("Delivered Tickets per Person")
+        delivered = fdf[fdf["Delivery"].isin(["Delivered"])]
+        if delivered.empty:
+            st.info("No delivered tickets found.")
+        else:
+            for user in sorted(delivered["User"].unique()):
+                ud = delivered[delivered["User"] == user]
+                # Aggregate unique tickets
+                user_tickets = (
+                    ud.groupby(["Ticket No", "Summary", "Status"])
+                    ["Hours"].sum().reset_index()
+                    .sort_values("Hours", ascending=False)
+                )
+                n_tickets = len(user_tickets)
+                total_h_user = user_tickets["Hours"].sum()
+
+                with st.expander(
+                    f"**{user}** -- {n_tickets} tickets, "
+                    f"{total_h_user:.1f}h delivered"
+                ):
+                    user_tickets["Jira Link"] = user_tickets[
+                        "Ticket No"
+                    ].apply(
+                        lambda t: f"{JIRA_BASE_URL}{t}"
+                        if pd.notna(t) else ""
+                    )
+                    st.dataframe(
+                        user_tickets,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Jira Link": st.column_config.LinkColumn(
+                                "Jira Link"
+                            ),
+                            "Hours": st.column_config.NumberColumn(
+                                format="%.2f"
+                            ),
+                        },
+                    )
+
+        st.markdown("---")
         st.subheader("Not Yet Delivered Tickets (In Progress / To Do)")
         not_dlv = fdf[fdf["Delivery"].isin(["In Progress", "Not Started"])]
         if not_dlv.empty:
