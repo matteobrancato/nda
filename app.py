@@ -1,12 +1,10 @@
-import streamlit as st
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
+import json
+import re
 from datetime import datetime
 from pathlib import Path
-import json
-import io
-import re
+import pandas as pd
+import plotly.express as px
+import streamlit as st
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -337,6 +335,16 @@ def process_data(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     )
     if "User" not in df.columns:
         df["User"] = "Unknown"
+
+    # Sanitize mixed-type columns to avoid Arrow serialization errors.
+    # Must happen after Is Leave is computed (it checks Leave Type notna).
+    for col in df.columns:
+        if col == "Is Leave":
+            df[col] = df[col].astype(bool)
+        elif col == "Hours":
+            continue  # already numeric
+        elif df[col].dtype == object:
+            df[col] = df[col].fillna("").astype(str)
 
     return df
 
