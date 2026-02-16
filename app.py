@@ -367,6 +367,31 @@ def safe_pct(num: float, den: float) -> float:
     return (num / den * 100) if den else 0
 
 
+def sanitize_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Make a dataframe safe for Arrow/st.dataframe serialization.
+
+    Fixes mixed-type columns, None values in object columns, and
+    ensures all dtypes are clean for pyarrow conversion.
+    """
+    out = df.copy()
+    for col in out.columns:
+        # Bool columns are fine
+        if pd.api.types.is_bool_dtype(out[col]):
+            continue
+        # Numeric columns: coerce any stray non-numeric values
+        if pd.api.types.is_numeric_dtype(out[col]):
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+            continue
+        # Everything else: force to string, replace None/NaN with ""
+        try:
+            out[col] = out[col].fillna("").astype(str)
+        except (TypeError, ValueError):
+            out[col] = out[col].apply(
+                lambda x: str(x) if x is not None else ""
+            )
+    return out
+
+
 def display_table(df: pd.DataFrame, cols: list[str], key: str = ""):
     available = [c for c in cols if c in df.columns]
     display = df[available].reset_index(drop=True)
@@ -374,15 +399,15 @@ def display_table(df: pd.DataFrame, cols: list[str], key: str = ""):
         display["Jira Link"] = display["Ticket No"].apply(
             lambda t: f"{JIRA_BASE_URL}{t}" if pd.notna(t) else ""
         )
-        available.append("Jira Link")
-    config = {"Hours": st.column_config.NumberColumn(format="%.2f")}
+    display = sanitize_df(display)
+    col_config = {"Hours": st.column_config.NumberColumn(format="%.2f")}
     if "Jira Link" in display.columns:
-        config["Jira Link"] = st.column_config.LinkColumn("Jira Link")
+        col_config["Jira Link"] = st.column_config.LinkColumn("Jira Link")
     if "Estimate" in display.columns:
-        config["Estimate"] = st.column_config.NumberColumn(format="%.1f")
+        col_config["Estimate"] = st.column_config.NumberColumn(format="%.1f")
     st.dataframe(
         display, use_container_width=True, hide_index=True,
-        column_config=config, key=key if key else None,
+        column_config=col_config, key=key if key else None,
     )
 
 
@@ -696,8 +721,10 @@ def main():
                     f"{safe_pct(delivered_h, productive_h):.1f}%",
             }
             st.dataframe(
-                pd.DataFrame(list(ratios.items()),
-                             columns=["Ratio", "Value"]),
+                sanitize_df(
+                    pd.DataFrame(list(ratios.items()),
+                                 columns=["Ratio", "Value"])
+                ),
                 use_container_width=True, hide_index=True,
             )
 
@@ -765,7 +792,8 @@ def main():
             })
         psummary = (pd.DataFrame(rows)
                     .sort_values("Total Hours", ascending=False))
-        st.dataframe(psummary, use_container_width=True, hide_index=True)
+        st.dataframe(sanitize_df(psummary), use_container_width=True,
+                     hide_index=True)
 
         st.subheader("Category Distribution per Person")
         users_list = sorted(fdf["User"].unique())
@@ -976,8 +1004,10 @@ def main():
                 "Delivered %": round(safe_pct(dlv, t), 1),
             })
         st.dataframe(
-            pd.DataFrame(dlv_rows)
-            .sort_values("Total Hours", ascending=False),
+            sanitize_df(
+                pd.DataFrame(dlv_rows)
+                .sort_values("Total Hours", ascending=False)
+            ),
             use_container_width=True, hide_index=True,
         )
 
@@ -1009,7 +1039,7 @@ def main():
                         if pd.notna(t) else ""
                     )
                     st.dataframe(
-                        user_tickets,
+                        sanitize_df(user_tickets),
                         use_container_width=True,
                         hide_index=True,
                         column_config={
@@ -1105,7 +1135,7 @@ def main():
                     )
                 lv_rows.append(row)
             st.dataframe(
-                pd.DataFrame(lv_rows),
+                sanitize_df(pd.DataFrame(lv_rows)),
                 use_container_width=True, hide_index=True,
             )
 
