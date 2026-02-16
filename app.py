@@ -336,14 +336,16 @@ def process_data(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     if "User" not in df.columns:
         df["User"] = "Unknown"
 
-    # Sanitize mixed-type columns to avoid Arrow serialization errors.
+    # Sanitize columns to avoid Arrow serialization errors from mixed types.
     # Must happen after Is Leave is computed (it checks Leave Type notna).
     for col in df.columns:
         if col == "Is Leave":
             df[col] = df[col].astype(bool)
         elif col == "Hours":
             continue  # already numeric
-        elif df[col].dtype == object:
+        elif pd.api.types.is_numeric_dtype(df[col]):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        else:
             df[col] = df[col].fillna("").astype(str)
 
     return df
