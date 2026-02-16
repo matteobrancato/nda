@@ -41,6 +41,10 @@ st.markdown("""
         background-color: #f8f9fa; padding: 0.8rem; border-radius: 10px;
         border-left: 4px solid #667eea;
     }
+    div[data-testid="stMetric"] label { color: #495057 !important; }
+    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+        color: #212529 !important;
+    }
     .stTabs [data-baseweb="tab-list"] { gap: 8px; }
     .stTabs [data-baseweb="tab"] {
         padding: 8px 20px; border-radius: 8px 8px 0 0;
@@ -69,6 +73,7 @@ DEFAULT_CONFIG = {
         "Duty Activities", "Regression Analysis", "Code refactoring",
         "Maintenance", "CI/CD maintenance",
         "Test Data Checks", "Retesting", "Bug Retesting",
+        "Code Reviews",
         "Demand",
     ],
     "leave_keywords": [
