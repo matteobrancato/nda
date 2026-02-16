@@ -296,6 +296,8 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def process_data(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    # Drop duplicate columns from source file
+    df = df.loc[:, ~df.columns.duplicated()]
     if "Ticket No" not in df.columns:
         st.error("Column 'Ticket No' not found. Check your file format.")
         return df
@@ -393,8 +395,16 @@ def sanitize_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def display_table(df: pd.DataFrame, cols: list[str], key: str = ""):
-    available = [c for c in cols if c in df.columns]
-    display = df[available].reset_index(drop=True)
+    # De-duplicate column list while preserving order
+    seen = set()
+    unique_cols = []
+    for c in cols:
+        if c not in seen and c in df.columns:
+            seen.add(c)
+            unique_cols.append(c)
+    display = df[unique_cols].reset_index(drop=True)
+    # De-duplicate any duplicate column names in the dataframe itself
+    display = display.loc[:, ~display.columns.duplicated()]
     if "Ticket No" in display.columns and "Jira Link" not in display.columns:
         display["Jira Link"] = display["Ticket No"].apply(
             lambda t: f"{JIRA_BASE_URL}{t}" if pd.notna(t) else ""
