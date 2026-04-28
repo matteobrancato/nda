@@ -26,9 +26,9 @@ st.markdown("""
         padding: 1.2rem; border-radius: 12px; color: white;
         text-align: center; margin-bottom: 0.5rem;
     }
-    .metric-card h3 { margin: 0; font-size: 0.8rem; opacity: 0.9;
+    .metric-card h3 { margin: 0; font-size: 0.9rem; opacity: 0.9;
                        text-transform: uppercase; letter-spacing: 0.5px; }
-    .metric-card h1 { margin: 0.3rem 0 0; font-size: 1.8rem; font-weight: 700; }
+    .metric-card h1 { margin: 0.3rem 0 0; font-size: 2.2rem; font-weight: 700; }
     .metric-card .sub { font-size: 0.75rem; opacity: 0.8; margin-top: 2px; }
     .mc-da  { background: linear-gradient(135deg, #51cf66, #37b24d); }
     .mc-tst { background: linear-gradient(135deg, #339af0, #1c7ed6); }
@@ -62,6 +62,7 @@ st.markdown("""
 # ---------------------------------------------------------------------------
 JIRA_BASE_URL = "https://elab-aswatson.atlassian.net/browse/"
 CONFIG_PATH = Path(__file__).parent / "keyword_config.json"
+SHOW_DELIVERY_STATUS = False  # re-enable: set True + add "Delivery Status" to tabs list
 
 DEFAULT_CONFIG = {
     "nda_ticket_prefixes": ["NDA"],
@@ -374,6 +375,24 @@ def safe_pct(num: float, den: float) -> float:
     return (num / den * 100) if den else 0
 
 
+def fmt_hours(h) -> str:
+    try:
+        h = float(h)
+    except (TypeError, ValueError):
+        return str(h) if h else ""
+    total_min = round(h * 60)
+    hh = total_min // 60
+    mm = total_min % 60
+    return f"{hh}h {mm:02d}m" if mm else f"{hh}h"
+
+
+def fmt_hours_df(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    for c in cols:
+        if c in df.columns:
+            df[c] = df[c].apply(fmt_hours)
+    return df
+
+
 def sanitize_df(df: pd.DataFrame) -> pd.DataFrame:
     """Make a dataframe safe for Arrow/st.dataframe serialization.
 
@@ -415,7 +434,9 @@ def display_table(df: pd.DataFrame, cols: list[str], key: str = ""):
             lambda t: f"{JIRA_BASE_URL}{t}" if pd.notna(t) else ""
         )
     display = sanitize_df(display)
-    col_config = {"Hours": st.column_config.NumberColumn(format="%.2f")}
+    if "Hours" in display.columns:
+        display["Hours"] = display["Hours"].apply(fmt_hours)
+    col_config = {}
     if "Jira Link" in display.columns:
         col_config["Jira Link"] = st.column_config.LinkColumn("Jira Link")
     if "Estimate" in display.columns:
@@ -634,7 +655,7 @@ def main():
     productive_h = da_h + test_h
     delivered_h = fdf.loc[fdf["Delivery"] == "Delivered", "Hours"].sum()
 
-    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.markdown(metric_card(
         "Total Hours", f"{total_h:,.1f}", "mc-tot"),
         unsafe_allow_html=True)
@@ -654,14 +675,6 @@ def main():
         "Leave", f"{leave_h:,.1f}h", "mc-lve",
         f"{safe_pct(leave_h, total_h):.0f}% of total"),
         unsafe_allow_html=True)
-    c6.markdown(metric_card(
-        "Productive", f"{safe_pct(productive_h, total_h):.0f}%", "mc-prd",
-        f"{productive_h:,.1f}h"),
-        unsafe_allow_html=True)
-    c7.markdown(metric_card(
-        "Delivered", f"{safe_pct(delivered_h, total_h):.0f}%", "mc-dlv",
-        f"{delivered_h:,.1f}h"),
-        unsafe_allow_html=True)
 
     st.markdown("")
 
@@ -670,7 +683,7 @@ def main():
     # -------------------------------------------------------------------
     tabs = st.tabs([
         "Overview", "By Person", "Category Detail",
-        "Delivery Status", "Leave Analysis", "Raw Data",
+        "Leave Analysis", "Raw Data",
     ])
 
     # === OVERVIEW ======================================================
@@ -807,8 +820,12 @@ def main():
             })
         psummary = (pd.DataFrame(rows)
                     .sort_values("Total Hours", ascending=False))
-        st.dataframe(sanitize_df(psummary), use_container_width=True,
-                     hide_index=True)
+        st.dataframe(
+            fmt_hours_df(sanitize_df(psummary),
+                         ["Total Hours", "DA Hours", "Testing Hours",
+                          "NDA Hours", "Leave Hours"]),
+            use_container_width=True, hide_index=True,
+        )
 
         st.subheader("Category Distribution per Person")
         users_list = sorted(fdf["User"].unique())
@@ -946,7 +963,7 @@ def main():
             st.markdown("---")
 
     # === DELIVERY STATUS ===============================================
-    with tabs[3]:
+    if SHOW_DELIVERY_STATUS:
         st.subheader("Delivery Status Analysis")
         st.markdown(
             "Tickets classified as **Delivered** (Done, In Review), "
@@ -1088,7 +1105,7 @@ def main():
             )
 
     # === LEAVE ANALYSIS ================================================
-    with tabs[4]:
+    with tabs[3]:
         st.subheader("Leave Analysis")
         leave_data = fdf[fdf["Is Leave"]].copy()
 
@@ -1149,8 +1166,11 @@ def main():
                                "Hours"].sum(), 1
                     )
                 lv_rows.append(row)
+            lv_df = sanitize_df(pd.DataFrame(lv_rows))
+            leave_type_names = sorted(leave_data["Leave Type"].unique())
+            hour_cols = ["Total Leave Hours"] + leave_type_names
             st.dataframe(
-                sanitize_df(pd.DataFrame(lv_rows)),
+                fmt_hours_df(lv_df, hour_cols),
                 use_container_width=True, hide_index=True,
             )
 
@@ -1165,7 +1185,7 @@ def main():
             )
 
     # === RAW DATA ======================================================
-    with tabs[5]:
+    with tabs[4]:
         st.subheader("Processed Data")
         st.markdown(f"**{len(fdf)} rows** after filters")
 
