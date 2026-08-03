@@ -54,6 +54,40 @@ st.markdown("""
         display: inline-block; background: #e9ecef; padding: 2px 8px;
         border-radius: 10px; font-size: 0.75rem; margin: 2px;
     }
+    /* Floating running total for the selected tickets. z-index clears
+       Streamlit's header and toolbar, which both sit at 999990. */
+    .hours-badge {
+        position: fixed; right: 28px; bottom: 28px; z-index: 1000000;
+        background: linear-gradient(135deg, #667eea, #764ba2);
+        color: #fff; border-radius: 12px;
+        padding: 0.65rem 1.05rem; min-width: 150px;
+        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.30);
+        cursor: default; user-select: none;
+    }
+    .hours-badge .hb-lbl { font-size: 0.68rem; text-transform: uppercase;
+                            letter-spacing: 0.6px; opacity: 0.85;
+                            line-height: 1.2; }
+    .hours-badge .hb-val { font-size: 1.55rem; font-weight: 700;
+                            line-height: 1.15;
+                            font-variant-numeric: tabular-nums; }
+    /* 0fr -> 1fr expands to the content's natural height, so the breakdown
+       cannot be clipped by a hardcoded max-height. */
+    .hours-badge .hb-break {
+        display: grid; grid-template-rows: 0fr; opacity: 0; margin-top: 0;
+        transition: grid-template-rows 0.28s ease, opacity 0.18s ease,
+                    margin-top 0.28s ease;
+    }
+    .hours-badge:hover .hb-break {
+        grid-template-rows: 1fr; opacity: 1; margin-top: 0.5rem;
+    }
+    .hours-badge .hb-inner {
+        overflow: hidden; min-height: 0;
+        border-top: 1px solid rgba(255, 255, 255, 0.28);
+        padding-top: 0.45rem; font-size: 0.78rem; line-height: 1.5;
+    }
+    @media (max-width: 640px) {
+        .hours-badge { right: 12px; bottom: 12px; }
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -63,6 +97,8 @@ st.markdown("""
 JIRA_BASE_URL = "https://elab-aswatson.atlassian.net/browse/"
 CONFIG_PATH = Path(__file__).parent / "keyword_config.json"
 SHOW_DELIVERY_STATUS = False  # re-enable: set True + add "Delivery Status" to tabs list
+TOP_TICKETS = 15  # rows shown per category before "Show all" is offered
+SELECTION_KEY = "_selected_hours"  # session-state registry: table key -> hours
 
 DEFAULT_CONFIG = {
     "nda_ticket_prefixes": ["NDA"],
@@ -393,6 +429,32 @@ def fmt_hours_df(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     return df
 
 
+def reset_hours_selection() -> None:
+    """Clear the per-run selection registry. Call first thing in main()."""
+    st.session_state[SELECTION_KEY] = {}
+
+
+def render_hours_badge() -> None:
+    """Draw the floating total of the selected tickets. Call last in main()."""
+    registry = st.session_state.get(SELECTION_KEY, {})
+    hours = [h for table_hours in registry.values() for h in table_hours]
+    if not hours:
+        return
+    total = sum(hours)
+    tables = sum(1 for table_hours in registry.values() if table_hours)
+    across = f"<br/>across {tables} tables" if tables > 1 else ""
+    st.markdown(
+        f'<div class="hours-badge">'
+        f'<div class="hb-lbl">Selected</div>'
+        f'<div class="hb-val">{fmt_hours(total)}</div>'
+        f'<div class="hb-break"><div class="hb-inner">'
+        f'<b>{len(hours)}</b> ticket{"s" if len(hours) != 1 else ""}<br/>'
+        f'<b>{total:.2f}</b> decimal hours{across}'
+        f'</div></div></div>',
+        unsafe_allow_html=True,
+    )
+
+
 def sanitize_df(df: pd.DataFrame) -> pd.DataFrame:
     """Make a dataframe safe for Arrow/st.dataframe serialization.
 
@@ -418,7 +480,17 @@ def sanitize_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def display_table(df: pd.DataFrame, cols: list[str], key: str = ""):
+def display_table(df: pd.DataFrame, cols: list[str], key: str = "",
+                  selectable: bool = False) -> tuple[int, float]:
+    """Render a dataframe. Returns (n_selected, selected_hours).
+
+    With selectable=True the table gets row checkboxes, the selected hours are
+    registered for the floating badge, and the return value reflects the current
+    selection; otherwise it is always (0, 0.0). A unique key is required when
+    selectable, since Streamlit needs one to track the selection state.
+    """
+    if selectable and not key:
+        raise ValueError("display_table(selectable=True) requires a key")
     # De-duplicate column list while preserving order
     seen = set()
     unique_cols = []
@@ -434,17 +506,34 @@ def display_table(df: pd.DataFrame, cols: list[str], key: str = ""):
             lambda t: f"{JIRA_BASE_URL}{t}" if pd.notna(t) else ""
         )
     display = sanitize_df(display)
+    # Capture numeric hours from the exact frame handed to st.dataframe, before
+    # fmt_hours stringifies it -- selection returns positions into this frame.
+    numeric_hours = None
     if "Hours" in display.columns:
+        numeric_hours = pd.to_numeric(
+            display["Hours"], errors="coerce"
+        ).fillna(0.0)
         display["Hours"] = display["Hours"].apply(fmt_hours)
     col_config = {}
     if "Jira Link" in display.columns:
         col_config["Jira Link"] = st.column_config.LinkColumn("Jira Link")
     if "Estimate" in display.columns:
         col_config["Estimate"] = st.column_config.NumberColumn(format="%.1f")
-    st.dataframe(
+    event = st.dataframe(
         display, use_container_width=True, hide_index=True,
         column_config=col_config, key=key if key else None,
+        on_select="rerun" if selectable else "ignore",
+        selection_mode="multi-row",
     )
+    if not selectable or numeric_hours is None:
+        return 0, 0.0
+    # Streamlit rebuilds the widget (and drops the selection) whenever the data
+    # changes, so stale positions cannot survive -- but guard anyway, since an
+    # out-of-range .iloc would take down the whole page.
+    rows = [i for i in event.selection.rows if 0 <= i < len(numeric_hours)]
+    selected = [float(numeric_hours.iloc[i]) for i in rows]
+    st.session_state.setdefault(SELECTION_KEY, {})[key] = selected
+    return len(selected), sum(selected)
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +658,7 @@ def render_keyword_config() -> bool:
 # MAIN
 # ---------------------------------------------------------------------------
 def main():
+    reset_hours_selection()
     st.title("Jira Timesheet Dashboard")
     st.caption(
         "Upload a Jira Assistant Excel export to analyse timesheet data"
@@ -901,6 +991,12 @@ def main():
     # === CATEGORY DETAIL ===============================================
     with tabs[2]:
         st.subheader("Category Breakdown")
+        st.caption(
+            "Tick rows to add their hours up in the badge at the bottom "
+            "right; it totals across all three tables. Sorting a column "
+            "clears the selection -- use the table's search icon to narrow "
+            "rows down instead."
+        )
 
         for cat in ["DA", "TESTING", "NDA"]:
             color = CATEGORY_COLORS[cat]
@@ -916,36 +1012,29 @@ def main():
                 unsafe_allow_html=True,
             )
 
-            dlv_counts = (cat_data.groupby("Delivery")["Hours"]
-                          .sum().reset_index())
-            dc1, dc2 = st.columns([1, 2])
-            with dc1:
-                fig_dlv = px.pie(
-                    dlv_counts, names="Delivery", values="Hours",
-                    hole=0.4, color="Delivery",
-                    color_discrete_map=DELIVERY_COLORS,
-                )
-                fig_dlv.update_traces(textinfo="percent+value")
-                fig_dlv.update_layout(
-                    margin=dict(t=10, b=10), height=220,
-                    showlegend=True,
-                )
-                st.plotly_chart(fig_dlv, use_container_width=True)
-
-            with dc2:
-                top = (
-                    cat_data
-                    .groupby(["Ticket No", "Summary", "Status",
-                              "Delivery"])["Hours"]
-                    .sum().reset_index()
-                    .sort_values("Hours", ascending=False)
-                    .head(15)
-                )
-                display_table(
-                    top,
-                    ["Ticket No", "Summary", "Hours", "Status",
-                     "Delivery"],
-                    key=f"cat_{cat}_top",
+            tickets = (
+                cat_data
+                .groupby(["Ticket No", "Summary", "Status"])["Hours"]
+                .sum().reset_index()
+                .sort_values("Hours", ascending=False)
+            )
+            # The cap only gets in the way once there is something to cap.
+            show_all = len(tickets) <= TOP_TICKETS or st.checkbox(
+                f"Show all {len(tickets)} tickets",
+                key=f"cat_{cat}_all",
+            )
+            n_sel, h_sel = display_table(
+                tickets if show_all else tickets.head(TOP_TICKETS),
+                ["Ticket No", "Summary", "Hours", "Status"],
+                key=f"cat_{cat}_top",
+                selectable=True,
+            )
+            if n_sel:
+                st.caption(
+                    f"Selected in {cat}: **{n_sel}** "
+                    f"ticket{'s' if n_sel != 1 else ''} -- "
+                    f"**{fmt_hours(h_sel)}** ({h_sel:.2f}h, "
+                    f"{safe_pct(h_sel, ch):.0f}% of {cat})"
                 )
 
             ppl = (cat_data.groupby("User")["Hours"]
@@ -1200,6 +1289,8 @@ def main():
             ),
             mime="text/csv",
         )
+
+    render_hours_badge()
 
 
 if __name__ == "__main__":
